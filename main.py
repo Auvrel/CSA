@@ -1,12 +1,8 @@
-# main.py - start the GUI app
-# run: python main.py
+import flet as ft
 
-import sys
-from PyQt5 import QtWidgets
-from gui.app import MainWindow
+# Import the main application logic from flet_app.py
+from flet_app import main
 
-if __name__ == '__main__':
-    app = QtWidgets.QApplication(sys.argv)
-    w = MainWindow()
-    w.show()
-    sys.exit(app.exec_())
+if __name__ == "__main__":
+    # The 'target' function for ft.app() is now imported from flet_app.py
+    ft.app(target=main)

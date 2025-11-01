@@ -67,6 +67,24 @@ def load_archive_index(archive_file: str):
             return json.loads(idxb.decode('utf-8'))
     except Exception as e:
         raise
+def extract_archive(archive_file: str, output_dir: str, rsf_decompress_func=None):
+    """
+    Extracts all files in the archive to the given output directory.
+    Uses extract_single() for each entry.
+    """
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+
+    index = load_archive_index(archive_file)
+    for rel_path, meta in index.items():
+        try:
+            data = extract_single(archive_file, index, rel_path, rsf_decompress_func)
+            full_path = os.path.join(output_dir, rel_path)
+            os.makedirs(os.path.dirname(full_path), exist_ok=True)
+            with open(full_path, 'wb') as out:
+                out.write(data)
+        except Exception as e:
+            print(f"❌ Error extracting {rel_path}: {e}")
 
 def extract_single(archive_file: str, index: dict, rel_path: str, rsf_decompress_func=None):
     meta = index.get(rel_path)
@@ -75,13 +93,36 @@ def extract_single(archive_file: str, index: dict, rel_path: str, rsf_decompress
     with open(archive_file, 'rb') as f:
         f.seek(meta['start'])
         blob = f.read(meta['comp_size'])
-    method = meta.get('method')
-    # METHOD_RSF assumed equal to 5 here
+    method = meta.get('method', 4)  # Default to STORE_ONLY if not specified
+    
+    # METHOD_RSF = 5
     if method == 5 and rsf_decompress_func:
         return rsf_decompress_func(blob)
-    # method code 1 (DICOM) may be raw DICOM-compressed blob from core; treat as raw for simplicity
-    # if zipped/lzma etc, user must store metadata and reverse accordingly. For prototype, we return blob.
-    # If blob is zlib compressed, try to decompress
+    
+    # METHOD_STORE_ONLY = 4 - return raw
+    if method == 4:
+        return blob
+    
+    # METHOD_LZMA_TEXT = 2 - lzma decompress
+    if method == 2:
+        import lzma
+        try:
+            return lzma.decompress(blob)
+        except Exception as e:
+            # Fallback to raw if decompression fails
+            return blob
+    
+    # METHOD_ZLIB_GENERIC = 3 - zlib decompress
+    # METHOD_DICOM = 1 - also zlib compressed (residuals)
+    if method in (1, 3):
+        import zlib
+        try:
+            return zlib.decompress(blob)
+        except Exception as e:
+            # Fallback to raw if decompression fails
+            return blob
+    
+    # Unknown method - try both, then return raw
     try:
         import zlib
         return zlib.decompress(blob)

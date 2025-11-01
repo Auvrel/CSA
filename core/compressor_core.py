@@ -8,8 +8,6 @@
 # Comments are short and not cringe.
 
 import os
-import struct
-import json
 import zlib
 import lzma
 import warnings
