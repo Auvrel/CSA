@@ -1,4 +1,5 @@
-PyQt5
+flet
 numpy
 pydicom
 numba
+Pillow
