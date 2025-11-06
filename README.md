@@ -158,4 +158,4 @@ This project is licensed under the **MIT License** – see the [LICENSE](LICENSE
 
 ## 🖼 Screenshots
 
-*Add screenshots of your app UI here for a professional touch.*
+![*ScreenShot*](https://raw.githubusercontent.com/Auvrel/CSA/refs/heads/main/image.png)
