@@ -6,8 +6,8 @@ from typing import Callable
 import os
 
 # Placeholder imports for core logic - adjust if your file paths are different
-from core.archive import build_archive, extract_archive, load_archive_index # load_archive_index is used only for info
-from core.compressor_core import compress_file_core, decompress_file_core
+from core.archive import build_archive, extract_archive # load_archive_index is used only for info
+from core.compressor_core import compress_file_core
 
 # Type Aliases for clarity
 # The worker's progress_cb is (percent, message) which updates the UI

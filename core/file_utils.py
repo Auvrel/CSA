@@ -4,7 +4,7 @@ import os
 
 # quick list for text recognition
 TEXT_EXTS = {'.json', '.txt', '.log', '.csv', '.xml', '.sql', '.md'}
-DICOM_EXTS = {'.dcm', '.dicom'}
+DICOM_EXTS = {'.dcm', '.dicom',".jpg",".jpeg"}
 
 def detect_mode(path):
     """

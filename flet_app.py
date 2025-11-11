@@ -8,6 +8,7 @@ import time
 import traceback
 import tempfile
 import platform
+import logging
 MY_PAGE = None
 # --- CORE IMPORTS ---
 # NOTE: These imports rely on your 'worker.py' file being present.
@@ -91,7 +92,7 @@ class FletExtractWorker(ExtractWorker):
             # No need to delete extracted files, user can decide
             self.progress_cb(0, f"💥 Error: {e}")
             self.finished_cb(False, str(e))
-
+        
 # -----------------------
 # Modern minimalistic color palette 
 COLOR_BG      = "#1E1E1E"  
@@ -131,7 +132,8 @@ def main(page: ft.Page):
     file_picker_src_folder = ft.FilePicker(on_result=lambda e: None)
     file_picker_out = ft.FilePicker(on_result=lambda e: None)
     file_picker_extract = ft.FilePicker(on_result=lambda e: None)
-    page.overlay.extend([file_picker_src, file_picker_src_folder, file_picker_out, file_picker_extract])
+    file_picker_add_files = ft.FilePicker(on_result=lambda e: None)  # For adding files to archive
+    page.overlay.extend([file_picker_src, file_picker_src_folder, file_picker_out, file_picker_extract, file_picker_add_files])
    
     # Thread-safe UI update helper
     def safe_update(update_fn):
@@ -201,33 +203,37 @@ def main(page: ft.Page):
                
        return click_handler
     def log(msg, level="info"):
-        """Add log message (thread-safe, batched updates)"""
+        """Add log message (thread-safe, batched updates). PRODUCTION: Reduced verbosity."""
         nonlocal log_update_pending
+
+        # PRODUCTION: Only log errors and warnings to reduce UI noise
+        if level == "info":
+            return
+
         level_colors = {
-            "info": COLOR_TEXT_MUTED, "success": COLOR_SUCCESS, 
-            "error": COLOR_ERROR, "warning": COLOR_WARNING
+            "success": COLOR_SUCCESS, "error": COLOR_ERROR, "warning": COLOR_WARNING
         }
         timestamp = ft.Text(f"[{level.upper()}] ", size=11, color=level_colors.get(level, COLOR_TEXT_MUTED), weight=ft.FontWeight.BOLD)
         msg_text = ft.Text(msg, size=12, color=COLOR_TEXT, selectable=True)
-        
+
         log_entries.append(
             ft.Container(
                 content=ft.Row([timestamp, msg_text], spacing=5, tight=True),
                 padding=ft.padding.only(bottom=4, left=5, right=5)
             )
         )
-        
-        if len(log_entries) > 1000:
-            log_entries[:] = log_entries[-1000:]
-        
+
+        if len(log_entries) > 500:  # Reduced from 1000
+            log_entries[:] = log_entries[-500:]
+
         if not log_update_pending:
             log_update_pending = True
             def update_log():
                 nonlocal log_update_pending
-                log_scroll.controls = log_entries[-500:] 
+                log_scroll.controls = log_entries[-200:]  # Show fewer entries
                 log_scroll.update()
                 log_update_pending = False
-            
+
             safe_update(update_log)
 
     log_scroll = ft.ListView(
@@ -245,7 +251,15 @@ def main(page: ft.Page):
         padding=8,
         expand=True
     )
-
+    add_files_button = ft.ElevatedButton(
+    "Add Files ",
+    icon=ft.Icons.ADD,
+    on_click=lambda e: pick_files_to_add(),
+    bgcolor=COLOR_SUCCESS,
+    color=COLOR_TEXT,
+    height=40,
+    visible=False  # Hidden by default
+)
     # -----------------------
     # Progress indicators
     compression_progress = ft.ProgressBar(value=0, width=400, color=COLOR_ACCENT, bgcolor=COLOR_BORDER)
@@ -284,11 +298,62 @@ def main(page: ft.Page):
         current_explorer_path = None
         archive_index = None
         log("Explorer navigation state reset.", "info")
-    
+    def pick_files_to_add():
+        """Pick files to add to the current archive"""
+        if not is_archive or not current_source:
+            log("No archive loaded to add files to", "warning")
+            return
+
+        def picked_files(e):
+            if e.files and len(e.files) > 0:
+                file_paths = [f.path for f in e.files]
+                log(f"Selected {len(file_paths)} files to add", "success")
+                add_files_to_current_archive(file_paths)
+            else:
+                log("File selection cancelled", "warning")
+
+        file_picker_add_files.on_result = picked_files
+        file_picker_add_files.pick_files(
+            allow_multiple=True,
+            dialog_title="Select Files to Add to Archive",
+            file_type=ft.FilePickerFileType.ANY
+        )
+
+    def add_files_to_current_archive(file_paths):
+        """Add selected files to the current archive"""
+        if not is_archive or not current_source:
+            log("No archive loaded", "error")
+            return
+
+        def progress_callback(current, total, message):
+            safe_update(lambda: (setattr(status_text, 'value', f"Adding files: {message}"), status_text.update()))
+
+        def add_files_async():
+            try:
+                from core.archive import add_files_to_archive
+                from core.compressor_core import compress_file_core
+                added_count = add_files_to_archive(current_source, file_paths, progress_callback, compress_file_core)
+
+                if added_count > 0:
+                    # Reload the archive index and explorer
+                    nonlocal archive_index
+                    from core.archive import load_archive_index
+                    archive_index = load_archive_index(current_source)
+                    safe_update(lambda: load_explorer_archive(current_source))
+                    log(f"Successfully added {added_count} files to archive", "success")
+                else:
+                    log("No files were added to archive", "warning")
+
+            except Exception as ex:
+                log(f"Failed to add files to archive: {ex}", "error")
+            finally:
+                safe_update(lambda: (setattr(status_text, 'value', "Ready"), status_text.update()))
+
+        threading.Thread(target=add_files_async, daemon=True).start()
     def load_explorer_folder(path):
        """
-       Loads folder contents into the explorer, storing all controls in 
-       current_explorer_items for subsequent filtering.
+       Loads folder contents into the explorer.
+       PRODUCTION: Simplified error handling.
        """
        path_obj = Path(path)
        if not path_obj.is_dir():
@@ -515,28 +580,55 @@ def main(page: ft.Page):
          # Create tiles
          for res in results:
              if is_archive and archive_index is not None:
-                 # clicking should navigate into the virtual path or extract file
+                 # Archive search results
                  rel = res["rel_path"]
                  is_dir = res.get("is_dir", False)
                  def make_click_handler_archive(rel_path):
                      def on_click(e):
-                         # If it's a directory-like entry, open that virtual dir
                          if rel_path.endswith("/"):
+                             # Navigate to virtual directory
                              load_explorer_archive(current_source, rel_path.strip("/"))
                          else:
-                             # extract & open (same logic you already used in load_explorer_archive)
-                             log(f"Extract requested from search result: {rel_path}", "info")
-                             threading.Thread(target=lambda: (  # reuse extract logic
-                                 (lambda: None)()
-                             ), daemon=True).start()
-                             # fallback: call original click behavior by reusing existing handler construction
-                             load_explorer_archive(current_source, "")  # simply reload; preferred to implement real extract call
+                             # Extract and open file
+                             def extract_and_open_async():
+                                 try:
+                                     from core.archive import extract_single
+                                     from core.compressor_core import decompress_file_core
+
+                                     file_meta_data = archive_index.get(rel_path)
+                                     if not isinstance(file_meta_data, dict):
+                                         raise TypeError(f"Index for '{rel_path}' is corrupted")
+
+                                     data = extract_single(
+                                         current_source, rel_path, file_meta_data,
+                                         TEMP_DIR, decompress_file_core
+                                     )
+
+                                     if not data:
+                                         raise RuntimeError(f"Extraction returned empty data for {rel_path}")
+
+                                     temp_out_path = TEMP_DIR / rel_path
+                                     temp_out_path.parent.mkdir(parents=True, exist_ok=True)
+
+                                     with open(temp_out_path, "wb") as f:
+                                         f.write(data)
+
+                                     if not temp_out_path.exists():
+                                         raise RuntimeError(f"File was not created at {temp_out_path}")
+
+                                     log(f"Successfully extracted {rel_path} from search", "success")
+                                     safe_update(lambda: open_file_in_os(temp_out_path))
+
+                                 except Exception as ex:
+                                     log(f"Failed to extract file {rel_path}: {ex}", "error")
+
+                             threading.Thread(target=extract_and_open_async, daemon=True).start()
                      return on_click
- 
-                 tile = build_match_tile(res["label"], res["subtitle"], res["icon"], res["icon_color"], make_click_handler_archive(res["rel_path"]))
- 
+
+                 tile = build_match_tile(res["label"], res["subtitle"], res["icon"], res["icon_color"], make_click_handler_archive(rel))
+
              else:
-                 # Folder mode
+                 # Folder search results
                  full = res.get("full_path")
                  is_dir = res.get("is_dir", False)
                  def make_click_handler_fs(path, is_dir_flag):
@@ -544,10 +636,7 @@ def main(page: ft.Page):
                          if is_dir_flag:
                              load_explorer_folder(path)
                          else:
-                             # open file with existing loader (use load_async or direct open)
-                             log(f"Opening file from search: {path}", "info")
-                             threading.Thread(target=load_async, args=(), daemon=True).start()
-                             # prefer to open file directly:
+                             # Open file directly
                              safe_update(lambda: open_file_in_os(path))
                      return on_click
                  tile = build_match_tile(res["label"], res["subtitle"], res["icon"], res["icon_color"], make_click_handler_fs(full, is_dir))
@@ -735,7 +824,7 @@ def main(page: ft.Page):
                         else:
                             # End file
                             contents[segment] = {'type': 'file', 'meta': meta, 'path': full_segment_path}
-
+              
             # 3. UI Update (Back on the main thread)
             def update_explorer_ui():
                 explorer_list.controls.clear()
@@ -797,43 +886,54 @@ def main(page: ft.Page):
                                 
                                 def extract_and_open_async():
                                    try:
-                                       # 1. Import BOTH the core function and the required callback
+                                       # Import extraction function
                                        from core.archive import extract_single
-                                       from core.compressor_core import decompress_file_core # <-- NEW IMPORT
+                                       from core.compressor_core import decompress_file_core
                                        
                                        index = archive_index # Index is already loaded
                                        
-                                       # 2. Define the missing arguments:
-                                       # We use the temporary directory (TEMP_DIR) for extraction,
-                                       # and the imported function (decompress_file_core) as the callback.
-                                       output_directory = TEMP_DIR # <-- Defined here
-                                       decompress_function = decompress_file_core # <-- Defined here
-           
-                                       # 3. CORRECTED CALL: Pass all 5 arguments
-                                       # Note: The data returned from extract_single is now the uncompressed bytes
+                                       # Get the file's metadata from the index
+                                       file_meta_data = index.get(rel_path_in_archive)
+                                        
+                                       if not isinstance(file_meta_data, dict):
+                                            raise TypeError(f"Index for '{rel_path_in_archive}' is corrupted. Expected dict, got: {type(file_meta_data).__name__}")
+                                        
+                                       # Extract the file data (extract_single returns bytes)
                                        data = extract_single(
-                                         archive_path, 
-                                         index, 
-                                         rel_path_in_archive, 
-                                         TEMP_DIR, 
-                                         decompress_file_core 
-                                     )
+                                           archive_path,
+                                           rel_path_in_archive,
+                                           file_meta_data,
+                                           TEMP_DIR,
+                                           decompress_file_core
+                                       )
                                        
-                                       temp_out_path = TEMP_DIR / Path(rel_path_in_archive).name
-                                       final_written_path = TEMP_DIR / rel_path_in_archive
-                                       if final_written_path.exists():
-                                           safe_update(lambda: open_file_in_os(final_written_path))
-                                       else:
-                                            # This fallback might be needed if extract_single didn't write it (e.g., failed and returned only data)
-                                            if data:
-                                                with open(temp_out_path, "wb") as f: # Use the simple name for the opened temp file
-                                                    f.write(data)
-                                                safe_update(lambda: open_file_in_os(temp_out_path))
-                                            else:
-                                                raise RuntimeError("Extraction failed and no file was written.")
+                                       if not data:
+                                           raise RuntimeError(f"Extraction returned empty data for {rel_path_in_archive}")
+                                       
+                                       # Write the extracted file to temp directory
+                                       temp_out_path = TEMP_DIR / rel_path_in_archive
+                                       temp_out_path.parent.mkdir(parents=True, exist_ok=True)
+                                       
+                                       with open(temp_out_path, "wb") as f:
+                                           f.write(data)
+                                       
+                                       # Verify the file was written correctly
+                                       if not temp_out_path.exists():
+                                           raise RuntimeError(f"File was not created at {temp_out_path}")
+                                       
+                                       written_size = temp_out_path.stat().st_size
+                                       if written_size != len(data):
+                                           log(f"Warning: File size mismatch for {rel_path_in_archive}: expected {len(data)} bytes, got {written_size} bytes", "warning")
+                                       
+                                       log(f"Successfully extracted {rel_path_in_archive} ({written_size} bytes)", "success")
+                                       
+                                       # Open the file in the OS default application
+                                       safe_update(lambda: open_file_in_os(temp_out_path))
                                           
                                    except Exception as ex:
-                                       log(f"Failed to extract or open file {rel_path_in_archive}: {ex}", "error")
+                                       import traceback
+                                       full_error = f"{ex}\n{traceback.format_exc()}"
+                                       log(f"Failed to extract or open file {rel_path_in_archive}: {full_error}", "error")
 
                                 threading.Thread(target=extract_and_open_async, daemon=True).start()
 # ...
@@ -873,26 +973,24 @@ def main(page: ft.Page):
             explorer_list.update()
             return
         
-        log(f"Attempting to load path: {path}", "info")
-        
         if path.lower().endswith('.csa') and os.path.isfile(path):
             is_archive = True
             current_source = path
             reset_explorer_navigation()
             load_explorer_archive(path)
-            log(f"Source set to Archive: {path}", "info")
+            log(f"Source set to Archive: {path}", "success")
         elif os.path.isdir(path):
             is_archive = False
             current_source = path
             reset_explorer_navigation()
             load_explorer_folder(path)
-            log(f"Source set to Folder: {path}", "info")
+            log(f"Source set to Folder: {path}", "success")
         elif os.path.isfile(path):
             is_archive = False
             current_source = path
             reset_explorer_navigation()
             load_explorer_folder(str(Path(path).parent))
-            log(f"Source set to Single File: {path}", "info")
+            log(f"Source set to Single File: {path}", "success")
         else:
             is_archive = False
             current_source = None
@@ -942,6 +1040,8 @@ def main(page: ft.Page):
         out_field.update()
         browse_out_file_btn.update()
         browse_out_folder_btn.update()
+        add_files_button.visible = is_archive
+        add_files_button.update()
     src_field = ft.TextField(
         label="Source Folder / File / Archive",
         hint_text="Enter path or click Browse",
@@ -972,10 +1072,10 @@ def main(page: ft.Page):
                 update_source_from_field()
             else:
                 log("Folder selection cancelled.", "warning")
-        
+
         file_picker_src_folder.on_result = picked_folder
         file_picker_src_folder.get_directory_path(dialog_title="Select Source Folder for Compression")
-    
+
     def pick_src_archive(e):
         if is_processing: return
         def picked_files(e):
@@ -1202,7 +1302,7 @@ def main(page: ft.Page):
 
             active_worker = FletCompressionWorker(src_path, out_path, update_progress_ui, on_task_finished)
             # active_worker.start()
-            log(f"Compression started: {root_dir} -> {out_file}", "info")
+            log(f"Compression started: {root_dir} -> {out_file}", "success")
             browse_out_file_btn.disabled = True
             page.run_thread(active_worker.run_process)
         elif is_processing == "extracting":
@@ -1215,8 +1315,7 @@ def main(page: ft.Page):
                 return
 
             active_worker = FletExtractWorker(src_path, out_path, update_progress_ui, on_task_finished)
-            # active_worker.start()
-            log(f"Extraction started: {archive_path} -> {output_dir}", "info")
+            log(f"Extraction started: {archive_path} -> {output_dir}", "success")
             browse_out_folder_btn.disabled = True
             page.run_thread(active_worker.run_process)
         
@@ -1247,7 +1346,9 @@ def main(page: ft.Page):
             # INSERT SEARCH FIELD HERE (compact, no giant gap)
             search_field,
             # explorer content (list)
-            explorer_list
+            explorer_list,
+            ft.Divider(height=1, color=COLOR_BORDER),
+            add_files_button
         ], spacing=6, expand=True),  # tightened spacing to reduce large gaps
         padding=12
     ),
@@ -1326,4 +1427,3 @@ def main(page: ft.Page):
     update_source_from_field() 
 if __name__ == "__main__":
     ft.app(target=main)
-    
